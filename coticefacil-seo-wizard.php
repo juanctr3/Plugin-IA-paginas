@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: CoticeFácil SEO Wizard (AJAX Workflow)
- * Description: Flujo interactivo: Analizar CSV -> Editar Prompt -> Previsualizar (con SEO) -> Publicar.
- * Version: 3.5
+ * Plugin Name: CoticeFácil SEO Wizard (Pro)
+ * Description: Generador IA con soporte para CSV, Manual, Blog, Páginas y Portafolios.
+ * Version: 4.0
  */
 
 if (!defined('ABSPATH')) exit;
@@ -12,114 +12,135 @@ define('CF_SEO_URL', plugin_dir_url(__FILE__));
 
 require_once CF_SEO_PATH . 'includes/class-seo-brain.php';
 
-// Configuración y Menú
+// Menú y Settings
 add_action('admin_menu', function() {
     add_menu_page('CoticeFácil SEO', 'SEO Auto', 'manage_options', 'cf-seo-wizard', 'cf_seo_render_view', 'dashicons-superhero', 99);
     register_setting('cf_seo_settings', 'cf_openai_key');
 });
-
 add_action('admin_init', function() { register_setting('cf_seo_group', 'cf_openai_key'); });
 
-// Encolar Scripts JS
+// Assets
 add_action('admin_enqueue_scripts', function($hook) {
     if ($hook != 'toplevel_page_cf-seo-wizard') return;
-    
-    wp_enqueue_script('cf-seo-js', CF_SEO_URL . 'js/admin-script.js', ['jquery'], '3.5', true);
+    wp_enqueue_script('cf-seo-js', CF_SEO_URL . 'js/admin-script.js', ['jquery'], '4.0', true);
     wp_localize_script('cf-seo-js', 'cf_ajax', [
         'url' => admin_url('admin-ajax.php'),
         'nonce' => wp_create_nonce('cf_seo_nonce')
     ]);
 });
 
-function cf_seo_render_view() {
-    include CF_SEO_PATH . 'admin/admin-view.php';
-}
+function cf_seo_render_view() { include CF_SEO_PATH . 'admin/admin-view.php'; }
 
-// --- AJAX HANDLERS (El Backend que responde al JS) ---
+// --- AJAX HANDLERS ---
 
-// Paso 1: Generar Prompt desde CSV
+// PASO 1: ANÁLISIS Y PROMPT
 add_action('wp_ajax_cf_step_1_analizar', function() {
     check_ajax_referer('cf_seo_nonce', 'nonce');
     
-    if (empty($_FILES['csv']['tmp_name'])) wp_send_json_error("Falta el archivo CSV");
+    $mode = $_POST['mode'];
+    $estrategia = sanitize_text_field($_POST['estrategia']);
+    $cerebro = new CF_SEO_Brain();
+    $analisis = [];
+    $extra_instruction = "";
 
     try {
-        $cerebro = new CF_SEO_Brain();
-        $datos = $cerebro->leer_csv($_FILES['csv']['tmp_name']);
-        $analisis = $cerebro->analizar_datos($datos, sanitize_text_field($_POST['estrategia']));
-        $prompt = $cerebro->generar_prompt_base($analisis, sanitize_text_field($_POST['estrategia']));
+        if ($mode === 'csv') {
+            // MODO AUTOMÁTICO
+            if (empty($_FILES['csv']['tmp_name'])) wp_send_json_error("Falta el archivo CSV");
+            $datos = $cerebro->leer_csv($_FILES['csv']['tmp_name']);
+            $analisis = $cerebro->analizar_datos($datos, $estrategia);
+        } else {
+            // MODO MANUAL
+            $main = sanitize_text_field($_POST['manual_main_kw']);
+            $sec_raw = sanitize_text_field($_POST['manual_sec_kw']);
+            $extra_instruction = sanitize_textarea_field($_POST['manual_extra_prompt']);
+            
+            // Convertimos input manual a la estructura que espera el cerebro
+            $sec_array = !empty($sec_raw) ? array_map(function($k){ return ['keyword' => trim($k)]; }, explode(',', $sec_raw)) : [];
+            
+            $analisis = [
+                'ganadora' => ['keyword' => $main],
+                'secundarias' => $sec_array
+            ];
+        }
+
+        // Generamos el prompt base
+        $prompt = $cerebro->generar_prompt_base($analisis, $estrategia);
+
+        // Si hay instrucción manual extra, la añadimos al final del prompt
+        if (!empty($extra_instruction)) {
+            $prompt .= "\n\nINSTRUCCIÓN ADICIONAL DEL USUARIO:\n" . $extra_instruction;
+        }
         
         wp_send_json_success(['prompt' => $prompt]);
+
     } catch (Exception $e) {
         wp_send_json_error($e->getMessage());
     }
 });
 
-// Paso 2: Generar Previsualización (AQUÍ ESTABA EL PROBLEMA)
+// PASO 2: PREVIEW (Igual que antes)
 add_action('wp_ajax_cf_step_2_preview', function() {
     check_ajax_referer('cf_seo_nonce', 'nonce');
-    
     $api_key = get_option('cf_openai_key');
-    if (empty($api_key)) wp_send_json_error("Error: Falta la API Key de OpenAI en la configuración.");
+    if (empty($api_key)) wp_send_json_error("Falta API Key.");
 
-    $prompt_usuario = stripslashes($_POST['prompt']);
-    // Detección robusta de booleano
-    $usar_imagen = filter_var($_POST['usar_imagen'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    $prompt = stripslashes($_POST['prompt']);
+    $usar_img = filter_var($_POST['usar_imagen'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
     try {
-        set_time_limit(180); // 3 minutos máximo
+        set_time_limit(180);
         $cerebro = new CF_SEO_Brain($api_key);
         
-        // 1. Generar Texto (Recibe objeto con title, html, meta_description, etc.)
-        $contenido = $cerebro->ejecutar_prompt_texto($prompt_usuario);
-        
-        if (!is_object($contenido) || !isset($contenido->title)) {
-             throw new Exception("La IA no devolvió el formato JSON correcto. Intenta de nuevo.");
-        }
+        $contenido = $cerebro->ejecutar_prompt_texto($prompt);
+        if (!isset($contenido->title)) throw new Exception("Error formato JSON IA.");
 
-        // 2. Generar Imagen (si aplica)
         $img_url = '';
-        if ($usar_imagen && !empty($contenido->image_prompt)) {
-            sleep(1); // Pequeña pausa
+        if ($usar_img && !empty($contenido->image_prompt)) {
+            sleep(1);
             $img_url = $cerebro->ejecutar_dall_e($contenido->image_prompt);
         }
 
-        // 3. RESPUESTA AL JAVASCRIPT (Aquí agregamos los campos SEO faltantes)
         wp_send_json_success([
             'title' => $contenido->title,
             'html' => $contenido->html_content,
-            // Estos son los campos que faltaban para llenar la caja azul:
             'main_keyword' => $contenido->main_keyword ?? '',       
             'secondary_keywords' => $contenido->secondary_keywords ?? '',
             'meta_description' => $contenido->meta_description ?? '',
             'img_url' => $img_url
         ]);
-
-    } catch (Exception $e) {
-        wp_send_json_error($e->getMessage());
-    }
+    } catch (Exception $e) { wp_send_json_error($e->getMessage()); }
 });
 
-// Paso 3: Publicar (Guardar en WP)
+// PASO 3: PUBLICAR (Ahora soporta Post Types y Categorías)
 add_action('wp_ajax_cf_step_3_publish', function() {
     check_ajax_referer('cf_seo_nonce', 'nonce');
-
-    if (empty($_POST['title'])) wp_send_json_error("Falta el título.");
 
     $title = sanitize_text_field($_POST['title']);
     $content = wp_kses_post(stripslashes($_POST['content'])); 
     $img_url = esc_url_raw($_POST['img_url']);
+    
+    // Nuevos campos
+    $post_type = sanitize_text_field($_POST['post_type']); // page, post, portfolio
+    $category_id = intval($_POST['post_category']);
 
     try {
-        $post_id = wp_insert_post([
+        $args = [
             'post_title'   => $title,
             'post_content' => $content,
-            'post_status'  => 'draft', // Borrador
-            'post_type'    => 'page',
+            'post_status'  => 'draft',
+            'post_type'    => $post_type, // Dinámico
             'post_author'  => get_current_user_id()
-        ]);
+        ];
 
-        if (is_wp_error($post_id)) throw new Exception("Error creando el post: " . $post_id->get_error_message());
+        // Si es una entrada de blog, asignamos categoría
+        if ($post_type === 'post' && $category_id > 0) {
+            $args['post_category'] = [$category_id];
+        }
+
+        $post_id = wp_insert_post($args);
+
+        if (is_wp_error($post_id)) throw new Exception("Error WP: " . $post_id->get_error_message());
 
         if (!empty($img_url)) {
             $cerebro = new CF_SEO_Brain();
@@ -128,7 +149,5 @@ add_action('wp_ajax_cf_step_3_publish', function() {
 
         wp_send_json_success(['edit_link' => get_edit_post_link($post_id)]);
 
-    } catch (Exception $e) {
-        wp_send_json_error($e->getMessage());
-    }
+    } catch (Exception $e) { wp_send_json_error($e->getMessage()); }
 });
