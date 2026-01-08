@@ -1,107 +1,111 @@
 <?php
 
 class CF_SEO_Brain {
+    private $api_key;
 
-    /**
-     * Lee el CSV y lo convierte en un array asociativo.
-     * Se asume formato: Keyword, Volume, CPC, Competition
-     */
-    public function leer_csv($filepath) {
-        $filas = array_map('str_getcsv', file($filepath));
-        $header = array_shift($filas); // Quitar encabezado si existe
-        $datos = [];
-
-        foreach ($filas as $fila) {
-            // Validación básica para evitar filas vacías
-            if (count($fila) < 2) continue;
-
-            // Mapeo manual (Ajustar según tu CSV real)
-            // [0] Keyword, [1] Volumen, [2] Competition, [3] CPC
-            $datos[] = [
-                'keyword' => $fila[0],
-                'volumen' => (int) preg_replace('/[^0-9]/', '', $fila[1] ?? 0),
-                'competition' => (float) ($fila[2] ?? 0), // Puede ser indice 0-100 o Low/High
-                'cpc' => (float) ($fila[3] ?? 0)
-            ];
-        }
-        return $datos;
+    public function __construct($key = null) {
+        $this->api_key = $key;
     }
 
-    /**
-     * Ordena y selecciona las keywords según la estrategia
-     */
-    public function analizar_datos($datos, $estrategia) {
-        
-        if ($estrategia === 'trafico') {
-            // ESTRATEGIA TRAFICO: Mayor volumen primero
-            usort($datos, function($a, $b) {
-                return $b['volumen'] - $a['volumen'];
-            });
-        } else {
-            // ESTRATEGIA LEADS: Mayor CPC (Intención de compra)
-            usort($datos, function($a, $b) {
-                return $b['cpc'] <=> $a['cpc']; // Operador nave espacial para float
-            });
-        }
+    // ... (Mantener funciones leer_csv y analizar_datos del código anterior) ...
+    // ... COPIA AQUÍ leer_csv y analizar_datos del código previo ...
 
-        // Seleccionar ganadora y secundarias
-        $ganadora = $datos[0];
-        $secundarias = array_slice($datos, 1, 5); // Tomamos las siguientes 5
-
-        return [
-            'ganadora' => $ganadora,
-            'secundarias' => $secundarias
-        ];
-    }
-
-    /**
-     * Construye el Prompt Maestro
-     */
-    public function generar_prompt($analisis, $estrategia) {
+    public function generar_articulo_ia($analisis, $estrategia) {
         $k_main = $analisis['ganadora']['keyword'];
         $k_sec = implode(", ", array_column($analisis['secundarias'], 'keyword'));
-        
-        // Datos específicos de CoticeFácil
-        $contexto = "
-        ACTÚA COMO: Experto SEO Senior y Copywriter especializado en B2B para 'CoticeFácil' (Marketplace de cotizaciones en Colombia).
-        TU MISIÓN: Redactar un artículo que posicione en Google y genere acciones del usuario.
-        
-        DATOS TÉCNICOS:
-        - Keyword Principal (H1 y primer párrafo): '$k_main'
-        - Keywords Secundarias (Distribuir en H2/H3): $k_sec
-        ";
 
-        if ($estrategia === 'leads') {
-            $instrucciones = "
-            ESTRATEGIA: **ALTA CONVERSIÓN (LEADS)**
-            El usuario que busca esto tiene dinero y urgencia.
-            1. Tono: Directo, profesional, orientado a la solución.
-            2. Estructura:
-               - Intro: Ataca el 'dolor' del usuario inmediatamente.
-               - Cuerpo: Compara opciones y destaca por qué cotizar con varios proveedores ahorra dinero.
-               - Cierre: CTA agresivo para usar el formulario de CoticeFácil.
-            3. Objetivo: Que hagan clic en 'Solicitar Cotización'. NO hagas introducciones históricas largas.
-            ";
-        } else {
-            $instrucciones = "
-            ESTRATEGIA: **TRÁFICO MASIVO (BRANDING)**
-            El usuario está investigando o aprendiendo.
-            1. Tono: Educativo, autoritario, útil.
-            2. Estructura:
-               - Intro: Definición clara (para ganar Featured Snippet).
-               - Cuerpo: Guía paso a paso, listas, consejos.
-               - Cierre: Soft-CTA (ej: '¿Necesitas ayuda profesional? Cotiza aquí').
-            3. Objetivo: Retener al usuario en la página y que comparta el contenido.
-            ";
+        // Instrucción del Sistema para JSON Estricto
+        $system_prompt = "Eres un experto SEO para 'CoticeFácil'. 
+        Tu respuesta DEBE ser un objeto JSON válido con esta estructura:
+        {
+            'title': 'Título optimizado (H1)',
+            'html_content': 'El cuerpo del artículo en HTML (h2, h3, p, ul). NO incluyas h1 ni body.',
+            'image_prompt': 'Una descripción detallada en inglés para DALL-E 3 que represente el tema principal de forma profesional y moderna.'
+        }";
+
+        $user_prompt = "Escribe un artículo sobre '$k_main'.
+        Estrategia: $estrategia.
+        Keywords secundarias: $k_sec.
+        
+        REGLAS:
+        1. En html_content, incluye un CTA que diga 'Solicita tu cotización ahora'.
+        2. El tono debe ser profesional y persuasivo.";
+
+        // Llamada a OpenAI (GPT-4o)
+        $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->api_key,
+                'Content-Type'  => 'application/json',
+            ],
+            'body' => json_encode([
+                'model' => 'gpt-4o', // O 'gpt-3.5-turbo' si quieres ahorrar
+                'messages' => [
+                    ['role' => 'system', 'content' => $system_prompt],
+                    ['role' => 'user', 'content' => $user_prompt]
+                ],
+                'response_format' => ['type' => 'json_object'] // Fuerza JSON
+            ]),
+            'timeout' => 120
+        ]);
+
+        if (is_wp_error($response)) throw new Exception($response->get_error_message());
+        
+        $body = json_decode(wp_remote_retrieve_body($response));
+        if (isset($body->error)) throw new Exception($body->error->message);
+
+        return json_decode($body->choices[0]->message->content);
+    }
+
+    public function generar_imagen_ia($prompt) {
+        // Llamada a DALL-E 3
+        $response = wp_remote_post('https://api.openai.com/v1/images/generations', [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->api_key,
+                'Content-Type'  => 'application/json',
+            ],
+            'body' => json_encode([
+                'model' => 'dall-e-3',
+                'prompt' => "Professional corporate illustration, minimalist, high quality: " . $prompt,
+                'n' => 1,
+                'size' => '1024x1024'
+            ]),
+            'timeout' => 60
+        ]);
+
+        if (is_wp_error($response)) throw new Exception("Error imagen: " . $response->get_error_message());
+        
+        $body = json_decode(wp_remote_retrieve_body($response));
+        if (isset($body->error)) throw new Exception("Error API Imagen: " . $body->error->message);
+
+        return $body->data[0]->url;
+    }
+
+    public function asignar_imagen_destacada($image_url, $post_id, $desc) {
+        // Cargar librerías de WP para manejo de medios
+        require_once(ABSPATH . 'wp-admin/includes/media.php');
+        require_once(ABSPATH . 'wp-admin/includes/file.php');
+        require_once(ABSPATH . 'wp-admin/includes/image.php');
+
+        // Descargar imagen temporalmente
+        $tmp = download_url($image_url);
+
+        if (is_wp_error($tmp)) return false;
+
+        $file_array = [
+            'name' => sanitize_title($desc) . '.jpg',
+            'tmp_name' => $tmp
+        ];
+
+        // Insertar en la librería
+        $id_img = media_handle_sideload($file_array, $post_id);
+
+        if (is_wp_error($id_img)) {
+            @unlink($file_array['tmp_name']);
+            return false;
         }
 
-        $formato = "
-        FORMATO DE SALIDA:
-        - Código HTML limpio (h2, h3, p, ul, strong).
-        - Incluye un 'Meta Title' y 'Meta Description' atractivos al inicio.
-        - Negritas en las frases clave importantes.
-        ";
-
-        return $contexto . $instrucciones . $formato;
+        // Asignar como Featured Image
+        set_post_thumbnail($post_id, $id_img);
+        return true;
     }
 }
