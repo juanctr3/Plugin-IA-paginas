@@ -1,181 +1,151 @@
 jQuery(document).ready(function($) {
     
-    // --- PASO 1: ANALIZAR CSV ---
+    // --- GESTIÓN DE UI (PESTAÑAS Y SELECTORES) ---
+    var activeMode = 'csv'; // Por defecto
+
+    // Cambio de Pestañas
+    $('.nav-tab').click(function(e) {
+        e.preventDefault();
+        $('.nav-tab').removeClass('nav-tab-active');
+        $(this).addClass('nav-tab-active');
+        
+        if ($(this).attr('id') === 'tab-csv') {
+            $('#panel-csv').show();
+            $('#panel-manual').hide();
+            activeMode = 'csv';
+        } else {
+            $('#panel-csv').hide();
+            $('#panel-manual').show();
+            activeMode = 'manual';
+        }
+    });
+
+    // Mostrar Categorías solo si es "Entrada de Blog"
+    $('#post_type_selector').change(function() {
+        if ($(this).val() === 'post') {
+            $('#category_row').fadeIn();
+        } else {
+            $('#category_row').fadeOut();
+        }
+    });
+
+    // --- PASO 1: GENERAR PROMPT (Dual Mode) ---
     $('#btn-analizar').click(function(e) {
         e.preventDefault();
         
-        var file_data = $('#csv_file').prop('files')[0];
         var estrategia = $('#estrategia').val();
-        
-        if (!file_data) {
-            alert("⚠️ Por favor selecciona un archivo CSV primero.");
-            return;
-        }
-
-        // Preparamos los datos para enviar (FormData es necesario para archivos)
         var form_data = new FormData();
-        form_data.append('csv', file_data);
-        form_data.append('estrategia', estrategia);
+        
         form_data.append('action', 'cf_step_1_analizar');
         form_data.append('nonce', cf_ajax.nonce);
+        form_data.append('mode', activeMode);
+        form_data.append('estrategia', estrategia);
 
-        // UI: Mostrar carga
+        // Lógica según el modo
+        if (activeMode === 'csv') {
+            var file = $('#csv_file').prop('files')[0];
+            if (!file) { alert("⚠️ Sube un CSV primero."); return; }
+            form_data.append('csv', file);
+        } else {
+            // Modo Manual
+            var main_kw = $('#manual_main_kw').val();
+            var sec_kw = $('#manual_sec_kw').val();
+            var extra_prompt = $('#manual_prompt').val();
+
+            if (!main_kw) { alert("⚠️ Debes escribir una Palabra Clave Principal."); return; }
+            
+            form_data.append('manual_main_kw', main_kw);
+            form_data.append('manual_sec_kw', sec_kw);
+            form_data.append('manual_extra_prompt', extra_prompt);
+        }
+
         $('#loader-1').show();
-        $('#btn-analizar').prop('disabled', true).text('Analizando...');
+        $('#btn-analizar').prop('disabled', true);
 
         $.ajax({
-            url: cf_ajax.url,
-            type: 'POST',
-            contentType: false,
-            processData: false,
-            data: form_data,
-            success: function(response) {
+            url: cf_ajax.url, type: 'POST', contentType: false, processData: false, data: form_data,
+            success: function(res) {
                 $('#loader-1').hide();
-                $('#btn-analizar').prop('disabled', false).text('Analizar CSV');
-                
-                if (response.success) {
-                    // Si todo sale bien, pasamos al Paso 2
-                    $('#prompt_area').val(response.data.prompt);
+                $('#btn-analizar').prop('disabled', false);
+                if (res.success) {
+                    $('#prompt_area').val(res.data.prompt);
                     $('#step-1').slideUp();
                     $('#step-2').fadeIn();
-                } else {
-                    alert("❌ Error: " + response.data);
-                }
-            },
-            error: function() {
-                $('#loader-1').hide();
-                $('#btn-analizar').prop('disabled', false).text('Analizar CSV');
-                alert("❌ Error de conexión con el servidor.");
+                } else { alert("❌ Error: " + res.data); }
             }
         });
     });
 
-    // --- PASO 2: GENERAR CONTENIDO (IA) ---
-    
-    // Función central para llamar a la IA
-    function generarContenido(usarImagen) {
-        var prompt_text = $('#prompt_area').val();
-        
-        if (!prompt_text) {
-            alert("El prompt no puede estar vacío.");
-            return;
-        }
-
-        // UI: Mostrar carga y bloquear botones
+    // --- PASO 2: GENERAR CONTENIDO (Igual que antes) ---
+    function generarContenido(conImg) {
+        var p = $('#prompt_area').val();
         $('#loader-2').show();
         $('#btn-gen-completo, #btn-gen-texto').prop('disabled', true);
 
         $.ajax({
-            url: cf_ajax.url,
-            type: 'POST',
-            data: {
-                action: 'cf_step_2_preview',
-                nonce: cf_ajax.nonce,
-                prompt: prompt_text,
-                usar_imagen: usarImagen
-            },
-            success: function(response) {
-                // UI: Restaurar botones
+            url: cf_ajax.url, type: 'POST',
+            data: { action: 'cf_step_2_preview', nonce: cf_ajax.nonce, prompt: p, usar_imagen: conImg },
+            success: function(res) {
                 $('#loader-2').hide();
                 $('#btn-gen-completo, #btn-gen-texto').prop('disabled', false);
 
-                if (response.success) {
-                    var data = response.data;
+                if (res.success) {
+                    var d = res.data;
+                    $('#seo-main-kw').val(d.main_keyword || '');
+                    $('#seo-sec-kw').val(d.secondary_keywords || '');
+                    $('#seo-meta-desc').val(d.meta_description || '');
+                    $('#preview-title').text(d.title);
+                    $('#preview-content').html(d.html);
                     
-                    // 1. LLENAR CAJA SEO (Datos Meta)
-                    // Usamos || '' para evitar que salga "undefined" si la IA olvida un campo
-                    $('#seo-main-kw').val(data.main_keyword || '');
-                    $('#seo-sec-kw').val(data.secondary_keywords || '');
-                    $('#seo-meta-desc').val(data.meta_description || '');
+                    if (d.img_url) { $('#preview-img').attr('src', d.img_url).show(); } 
+                    else { $('#preview-img').hide(); }
 
-                    // 2. LLENAR PREVISUALIZACIÓN VISUAL
-                    $('#preview-title').text(data.title);
-                    $('#preview-content').html(data.html);
-                    
-                    // 3. MANEJAR IMAGEN
-                    if (data.img_url) {
-                        $('#preview-img').attr('src', data.img_url).show();
-                        $('#no-img-msg').hide();
-                    } else {
-                        $('#preview-img').hide();
-                        $('#no-img-msg').show();
-                    }
-
-                    // Transición al Paso 3
-                    $('#step-2').slideUp();
-                    $('#step-3').fadeIn();
-                } else {
-                    alert("❌ Error IA: " + response.data);
-                }
+                    $('#step-2').slideUp(); $('#step-3').fadeIn();
+                } else { alert("❌ Error IA: " + res.data); }
             },
-            error: function(xhr, status, error) {
-                $('#loader-2').hide();
-                $('#btn-gen-completo, #btn-gen-texto').prop('disabled', false);
-                alert("❌ Error de conexión (Timeout o Servidor). Intenta de nuevo o reduce el prompt.");
-                console.log(error);
+            error: function() { 
+                $('#loader-2').hide(); $('#btn-gen-completo').prop('disabled', false);
+                alert("Timeout: El artículo es muy largo. Intenta de nuevo."); 
             }
         });
     }
+    $('#btn-gen-completo').click(function() { generarContenido(true); });
+    $('#btn-gen-texto').click(function() { generarContenido(false); });
 
-    // Botón: Generar Todo
-    $('#btn-gen-completo').click(function() {
-        generarContenido(true);
-    });
-
-    // Botón: Solo Texto (Más rápido)
-    $('#btn-gen-texto').click(function() {
-        generarContenido(false);
-    });
-
-
-    // --- PASO 3: PUBLICAR EN WORDPRESS ---
+    // --- PASO 3: PUBLICAR (Con Post Type y Categoría) ---
     $('#btn-publish').click(function() {
-        var title = $('#preview-title').text();
-        var content = $('#preview-content').html(); 
-        var img_url = $('#preview-img').attr('src');
+        var t = $('#preview-title').text();
+        var c = $('#preview-content').html();
+        var i = $('#preview-img').attr('src');
+        if ($('#preview-img').css('display') == 'none') i = '';
         
-        // Si la imagen está oculta (display:none), enviamos vacío
-        if ($('#preview-img').css('display') == 'none') {
-            img_url = '';
-        }
+        // Recoger configuración de publicación
+        var p_type = $('#post_type_selector').val();
+        var p_cat = $('#post_category').val();
 
-        // UI: Bloquear
         $('#loader-3').show();
-        $(this).prop('disabled', true).text('Publicando...');
+        $(this).prop('disabled', true);
 
         $.ajax({
-            url: cf_ajax.url,
-            type: 'POST',
-            data: {
-                action: 'cf_step_3_publish',
-                nonce: cf_ajax.nonce,
-                title: title,
-                content: content,
-                img_url: img_url
+            url: cf_ajax.url, type: 'POST',
+            data: { 
+                action: 'cf_step_3_publish', 
+                nonce: cf_ajax.nonce, 
+                title: t, content: c, img_url: i,
+                // Datos nuevos
+                post_type: p_type,
+                post_category: p_cat
             },
-            success: function(response) {
+            success: function(res) {
                 $('#loader-3').hide();
-                
-                if (response.success) {
-                    // Mostrar mensaje de éxito con enlace
-                    $('#success-msg').html(
-                        '✅ <strong>¡Publicado con éxito!</strong> <br>' +
-                        'Ahora ve a editar para pegar los datos SEO: ' +
-                        '<a href="' + response.data.edit_link + '" target="_blank" class="button button-small">Editar Página</a>'
-                    ).fadeIn();
-                    
-                    $('#btn-publish').hide(); // Ocultar botón para evitar duplicados
-                } else {
-                    alert("❌ Error al guardar: " + response.data);
-                    $('#btn-publish').prop('disabled', false).text('🚀 PUBLICAR BORRADOR');
+                if (res.success) {
+                    $('#success-msg').html('✅ <strong>¡Publicado!</strong> <a href="'+res.data.edit_link+'" target="_blank" class="button">Ver/Editar</a>').show();
+                    $('#btn-publish').hide();
+                } else { 
+                    alert("Error: " + res.data); 
+                    $('#btn-publish').prop('disabled', false); 
                 }
-            },
-            error: function() {
-                $('#loader-3').hide();
-                $('#btn-publish').prop('disabled', false).text('🚀 PUBLICAR BORRADOR');
-                alert("❌ Error de conexión al publicar.");
             }
         });
     });
-
 });
