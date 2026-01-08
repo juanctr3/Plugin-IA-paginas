@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: CoticeFácil SEO Wizard (AJAX Workflow)
- * Description: Flujo interactivo: Analizar CSV -> Editar Prompt -> Previsualizar -> Publicar.
- * Version: 3.0
+ * Description: Flujo interactivo: Analizar CSV -> Editar Prompt -> Previsualizar (con SEO) -> Publicar.
+ * Version: 3.5
  */
 
 if (!defined('ABSPATH')) exit;
@@ -24,7 +24,7 @@ add_action('admin_init', function() { register_setting('cf_seo_group', 'cf_opena
 add_action('admin_enqueue_scripts', function($hook) {
     if ($hook != 'toplevel_page_cf-seo-wizard') return;
     
-    wp_enqueue_script('cf-seo-js', CF_SEO_URL . 'js/admin-script.js', ['jquery'], '3.0', true);
+    wp_enqueue_script('cf-seo-js', CF_SEO_URL . 'js/admin-script.js', ['jquery'], '3.5', true);
     wp_localize_script('cf-seo-js', 'cf_ajax', [
         'url' => admin_url('admin-ajax.php'),
         'nonce' => wp_create_nonce('cf_seo_nonce')
@@ -44,10 +44,10 @@ add_action('wp_ajax_cf_step_1_analizar', function() {
     if (empty($_FILES['csv']['tmp_name'])) wp_send_json_error("Falta el archivo CSV");
 
     try {
-        $cerebro = new CF_SEO_Brain(); // No necesita API Key para este paso
+        $cerebro = new CF_SEO_Brain();
         $datos = $cerebro->leer_csv($_FILES['csv']['tmp_name']);
-        $analisis = $cerebro->analizar_datos($datos, $_POST['estrategia']);
-        $prompt = $cerebro->generar_prompt_base($analisis, $_POST['estrategia']);
+        $analisis = $cerebro->analizar_datos($datos, sanitize_text_field($_POST['estrategia']));
+        $prompt = $cerebro->generar_prompt_base($analisis, sanitize_text_field($_POST['estrategia']));
         
         wp_send_json_success(['prompt' => $prompt]);
     } catch (Exception $e) {
@@ -55,32 +55,43 @@ add_action('wp_ajax_cf_step_1_analizar', function() {
     }
 });
 
-// Paso 2: Generar Previsualización (Llamada a OpenAI)
+// Paso 2: Generar Previsualización (AQUÍ ESTABA EL PROBLEMA)
 add_action('wp_ajax_cf_step_2_preview', function() {
     check_ajax_referer('cf_seo_nonce', 'nonce');
     
     $api_key = get_option('cf_openai_key');
-    if (!$api_key) wp_send_json_error("Falta la API Key.");
+    if (empty($api_key)) wp_send_json_error("Error: Falta la API Key de OpenAI en la configuración.");
 
     $prompt_usuario = stripslashes($_POST['prompt']);
-    $usar_imagen = $_POST['usar_imagen'] === 'true';
+    // Detección robusta de booleano
+    $usar_imagen = filter_var($_POST['usar_imagen'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
     try {
-        set_time_limit(120); // Damos 2 minutos al servidor
+        set_time_limit(180); // 3 minutos máximo
         $cerebro = new CF_SEO_Brain($api_key);
         
-        // Generar Texto
+        // 1. Generar Texto (Recibe objeto con title, html, meta_description, etc.)
         $contenido = $cerebro->ejecutar_prompt_texto($prompt_usuario);
         
-        // Generar Imagen (si aplica)
+        if (!is_object($contenido) || !isset($contenido->title)) {
+             throw new Exception("La IA no devolvió el formato JSON correcto. Intenta de nuevo.");
+        }
+
+        // 2. Generar Imagen (si aplica)
         $img_url = '';
         if ($usar_imagen && !empty($contenido->image_prompt)) {
+            sleep(1); // Pequeña pausa
             $img_url = $cerebro->ejecutar_dall_e($contenido->image_prompt);
         }
 
+        // 3. RESPUESTA AL JAVASCRIPT (Aquí agregamos los campos SEO faltantes)
         wp_send_json_success([
             'title' => $contenido->title,
             'html' => $contenido->html_content,
+            // Estos son los campos que faltaban para llenar la caja azul:
+            'main_keyword' => $contenido->main_keyword ?? '',       
+            'secondary_keywords' => $contenido->secondary_keywords ?? '',
+            'meta_description' => $contenido->meta_description ?? '',
             'img_url' => $img_url
         ]);
 
@@ -93,25 +104,24 @@ add_action('wp_ajax_cf_step_2_preview', function() {
 add_action('wp_ajax_cf_step_3_publish', function() {
     check_ajax_referer('cf_seo_nonce', 'nonce');
 
+    if (empty($_POST['title'])) wp_send_json_error("Falta el título.");
+
     $title = sanitize_text_field($_POST['title']);
-    // Permitimos HTML en el contenido pero quitamos scripts maliciosos
     $content = wp_kses_post(stripslashes($_POST['content'])); 
     $img_url = esc_url_raw($_POST['img_url']);
 
     try {
-        // Crear Post
         $post_id = wp_insert_post([
             'post_title'   => $title,
             'post_content' => $content,
-            'post_status'  => 'draft', // Borrador por seguridad
+            'post_status'  => 'draft', // Borrador
             'post_type'    => 'page',
             'post_author'  => get_current_user_id()
         ]);
 
-        if (is_wp_error($post_id)) throw new Exception("Error creando post.");
+        if (is_wp_error($post_id)) throw new Exception("Error creando el post: " . $post_id->get_error_message());
 
-        // Descargar Imagen
-        if ($img_url) {
+        if (!empty($img_url)) {
             $cerebro = new CF_SEO_Brain();
             $cerebro->asignar_imagen_destacada($img_url, $post_id, $title);
         }
