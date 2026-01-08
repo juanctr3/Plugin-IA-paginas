@@ -12,48 +12,92 @@ class CF_SEO_Brain {
     }
 
     public function leer_csv($filepath) {
-        // CORRECCIÓN CSV: Permitir leer archivos de Mac y Excel antiguo
-        ini_set('auto_detect_line_endings', true);
-
         if (!file_exists($filepath)) {
-            throw new Exception("El archivo temporal no se encuentra.");
+            throw new Exception("El archivo no se pudo cargar.");
         }
 
-        $lineas = file($filepath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        
-        if (empty($lineas)) {
-            throw new Exception("El archivo CSV está totalmente vacío.");
+        // Abrimos el archivo en modo lectura
+        $handle = fopen($filepath, "r");
+        if (!$handle) {
+            throw new Exception("No se pudo abrir el archivo CSV.");
         }
 
         $datos = [];
-        $filas = array_map('str_getcsv', $lineas);
+        $header_found = false;
+        
+        // Índices por defecto (por si no encontramos headers, usamos la estructura estándar de Google)
+        $idx_keyword = 0;
+        $idx_volumen = 2; // Usualmente columna C
+        $idx_cpc = 6;     // Usualmente Top of page bid (high range)
 
-        // CORRECCIÓN HEADER: Solo quitamos la primera fila si parece ser un encabezado (texto)
-        // y si hay más de una fila de datos.
-        if (count($filas) > 1) {
-            // Verificamos si la columna de volumen (índice 1) NO es un número en la primera fila
-            $segunda_columna = $filas[0][1] ?? '';
-            if (!is_numeric(str_replace(['.', ','], '', $segunda_columna))) {
-                array_shift($filas); // Es un encabezado, lo quitamos
-            }
-        }
-
-        foreach ($filas as $index => $fila) {
-            // Mínimo necesitamos la Keyword (0) y Volumen (1)
-            if (count($fila) < 2) continue;
-
-            $vol = isset($fila[1]) ? preg_replace('/[^0-9]/', '', $fila[1]) : 0;
-            $cpc = isset($fila[3]) ? str_replace(',', '.', $fila[3]) : 0; // Normalizar decimales
+        // Google Ads usa TABULACIONES (\t) y codificación UTF-16LE a veces. 
+        // Intentamos leer línea por línea.
+        while (($data = fgetcsv($handle, 10000, "\t")) !== FALSE) {
             
+            // 1. Limpieza de caracteres invisibles (BOM) en la primera columna
+            $data[0] = preg_replace('/[\x00-\x1F\x80-\xFF]/', '', $data[0]);
+
+            // 2. BUSCAR ENCABEZADOS: Si aún no encontramos la cabecera, buscamos palabras clave
+            if (!$header_found) {
+                // Convertimos la fila a minúsculas para buscar mejor
+                $row_str = implode(" ", array_map('strtolower', $data));
+                
+                // Si encontramos "keyword" o "palabra clave", ESTA es la fila de encabezados
+                if (strpos($row_str, 'keyword') !== false || strpos($row_str, 'palabra clave') !== false) {
+                    $header_found = true;
+                    
+                    // Mapeo dinámico de columnas (Más robusto)
+                    foreach ($data as $index => $col_name) {
+                        $col = strtolower(trim($col_name));
+                        
+                        if (strpos($col, 'keyword') !== false || strpos($col, 'palabra clave') !== false) {
+                            $idx_keyword = $index;
+                        }
+                        // Búsquedas mensuales (Avg. monthly searches / Promedio...)
+                        elseif (strpos($col, 'avg. monthly') !== false || strpos($col, 'promedio de b') !== false) {
+                            $idx_volumen = $index;
+                        }
+                        // CPC Alto (Top of page bid (high) / Puja... intervalo alto)
+                        elseif (strpos($col, 'high range') !== false || strpos($col, 'intervalo alto') !== false) {
+                            $idx_cpc = $index;
+                        }
+                    }
+                }
+                continue; // Saltamos la fila de encabezados y las anteriores
+            }
+
+            // 3. PROCESAR DATOS (Solo si ya pasamos la cabecera)
+            
+            // Validar que la fila tenga suficientes columnas
+            if (count($data) <= $idx_cpc) continue;
+
+            $keyword = trim($data[$idx_keyword]);
+            if (empty($keyword)) continue;
+
+            // Limpiar números (Google usa espacios o comas para miles y comas/puntos para decimales)
+            // Ejemplo volumen: "10000" o "10,000" -> 10000
+            $vol_raw = $data[$idx_volumen];
+            $vol = (int) preg_replace('/[^0-9]/', '', $vol_raw);
+
+            // Ejemplo CPC: "2.500,00" o "2500.00" -> 2500.00
+            $cpc_raw = $data[$idx_cpc];
+            // Quitamos moneda y espacios
+            $cpc_clean = preg_replace('/[^0-9,.]/', '', $cpc_raw);
+            // Normalizamos decimales (reemplazar coma decimal por punto si es necesario)
+            $cpc_clean = str_replace(',', '.', $cpc_clean); 
+            $cpc = (float) $cpc_clean;
+
             $datos[] = [
-                'keyword' => trim($fila[0]),
-                'volumen' => (int) $vol,
-                'cpc' => (float) $cpc
+                'keyword' => $keyword,
+                'volumen' => $vol,
+                'cpc' => $cpc
             ];
         }
+        
+        fclose($handle);
 
         if (empty($datos)) {
-            throw new Exception("No se pudieron extraer datos válidos del CSV. Verifica que tenga columnas: Keyword, Volumen, Competencia, CPC.");
+            throw new Exception("El archivo se leyó pero no se encontraron datos válidos. Revisa que sea el archivo 'Keyword Stats' de Google Ads.");
         }
 
         return $datos;
