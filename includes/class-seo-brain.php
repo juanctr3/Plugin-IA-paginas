@@ -3,259 +3,149 @@
 class CF_SEO_Brain {
     private $api_key;
     
-    // Definimos las URLs como constantes para evitar errores de escritura o caracteres ocultos
     const URL_CHAT = 'https://api.openai.com/v1/chat/completions';
     const URL_IMAGE = 'https://api.openai.com/v1/images/generations';
 
     public function __construct($key = null) {
-        $this->api_key = trim($key); // Limpiamos espacios accidentales en la llave
+        $this->api_key = trim($key);
     }
 
-    /**
-     * 1. LEER CSV/TSV
-     * Detecta automáticamente si es un CSV normal o el archivo TSV exportado de Google Ads.
-     */
+    // --- 1. LEER CSV (Igual que antes) ---
     public function leer_csv($filepath) {
-        if (!file_exists($filepath)) {
-            throw new Exception("El archivo temporal no se encuentra.");
-        }
-
-        // Permitir leer saltos de línea antiguos (Mac/Excel)
+        if (!file_exists($filepath)) throw new Exception("El archivo no se pudo cargar.");
         ini_set('auto_detect_line_endings', true);
-
         $handle = fopen($filepath, "r");
-        if (!$handle) {
-            throw new Exception("No se pudo abrir el archivo CSV.");
-        }
+        if (!$handle) throw new Exception("No se pudo abrir el archivo CSV.");
 
-        $datos = [];
-        $header_found = false;
-        
-        // Índices por defecto (backup)
-        $idx_keyword = 0;
-        $idx_volumen = 2; 
-        $idx_cpc = 6;     
+        $datos = []; $header_found = false;
+        $idx_keyword = 0; $idx_volumen = 2; $idx_cpc = 6;
 
-        // Leemos línea por línea buscando tabulaciones (\t) típicas de Google Ads
         while (($data = fgetcsv($handle, 10000, "\t")) !== FALSE) {
-            
-            // Limpieza de caracteres invisibles (BOM) en la primera columna
-            if (isset($data[0])) {
-                $data[0] = preg_replace('/[\x00-\x1F\x80-\xFF]/', '', $data[0]);
-            }
-
-            // A. BUSCAR ENCABEZADOS
+            if (isset($data[0])) $data[0] = preg_replace('/[\x00-\x1F\x80-\xFF]/', '', $data[0]);
             if (!$header_found) {
                 $row_str = implode(" ", array_map('strtolower', $data));
-                
-                // Si encontramos "keyword" o "palabra clave", esta es la fila de encabezados
                 if (strpos($row_str, 'keyword') !== false || strpos($row_str, 'palabra clave') !== false) {
                     $header_found = true;
-                    
-                    // Mapeo dinámico de columnas
                     foreach ($data as $index => $col_name) {
                         $col = strtolower(trim($col_name));
-                        if (strpos($col, 'keyword') !== false || strpos($col, 'palabra clave') !== false) {
-                            $idx_keyword = $index;
-                        }
-                        elseif (strpos($col, 'avg. monthly') !== false || strpos($col, 'promedio de b') !== false) {
-                            $idx_volumen = $index;
-                        }
-                        elseif (strpos($col, 'high range') !== false || strpos($col, 'intervalo alto') !== false) {
-                            $idx_cpc = $index;
-                        }
+                        if (strpos($col, 'keyword') !== false || strpos($col, 'palabra clave') !== false) $idx_keyword = $index;
+                        elseif (strpos($col, 'avg. monthly') !== false || strpos($col, 'promedio de b') !== false) $idx_volumen = $index;
+                        elseif (strpos($col, 'high range') !== false || strpos($col, 'intervalo alto') !== false) $idx_cpc = $index;
                     }
                 }
-                continue; // Saltamos la fila de encabezados
+                continue;
             }
-
-            // B. PROCESAR DATOS
             if (count($data) <= $idx_cpc) continue;
-
             $keyword = trim($data[$idx_keyword]);
             if (empty($keyword)) continue;
-
-            // Limpiar números (10,000 -> 10000)
             $vol = (int) preg_replace('/[^0-9]/', '', $data[$idx_volumen]);
-            
-            // Limpiar CPC (2.500,00 -> 2500.00)
-            $cpc_clean = preg_replace('/[^0-9,.]/', '', $data[$idx_cpc]);
-            $cpc_clean = str_replace(',', '.', $cpc_clean); 
-            $cpc = (float) $cpc_clean;
-
-            $datos[] = [
-                'keyword' => $keyword,
-                'volumen' => $vol,
-                'cpc' => $cpc
-            ];
+            $cpc = (float) str_replace(',', '.', preg_replace('/[^0-9,.]/', '', $data[$idx_cpc]));
+            $datos[] = ['keyword' => $keyword, 'volumen' => $vol, 'cpc' => $cpc];
         }
-        
         fclose($handle);
-
-        if (empty($datos)) {
-            throw new Exception("No se encontraron datos válidos. Asegúrate de subir el archivo 'Keyword Stats' original de Google Ads.");
-        }
-
+        if (empty($datos)) throw new Exception("Datos no encontrados en el CSV de Google Ads.");
         return $datos;
     }
 
-    /**
-     * 2. ANALIZAR DATOS
-     * Ordena el array según la estrategia (Tráfico vs Leads)
-     */
+    // --- 2. ANALIZAR DATOS (Igual que antes) ---
     public function analizar_datos($datos, $estrategia) {
         if ($estrategia === 'trafico') {
-            // Mayor volumen primero
             usort($datos, function($a, $b) { return $b['volumen'] - $a['volumen']; });
         } else {
-            // Mayor CPC (intención de compra) primero
             usort($datos, function($a, $b) { return $b['cpc'] <=> $a['cpc']; });
         }
-
         $ganadora = $datos[0];
         $secundarias = count($datos) > 1 ? array_slice($datos, 1, 5) : [];
-
-        return [
-            'ganadora' => $ganadora, 
-            'secundarias' => $secundarias
-        ];
+        return ['ganadora' => $ganadora, 'secundarias' => $secundarias];
     }
 
     /**
-     * 3. GENERAR PROMPT BASE
-     * Crea las instrucciones para la IA pidiendo JSON con campos SEO.
+     * --- 3. GENERAR PROMPT MAESTRO (¡AQUÍ ESTÁ EL CAMBIO CLAVE!) ---
+     * Instrucciones detalladas para un artículo largo y estructurado.
      */
     public function generar_prompt_base($analisis, $estrategia) {
         $k_main = $analisis['ganadora']['keyword'];
         $k_sec_array = array_column($analisis['secundarias'], 'keyword');
         $k_sec = !empty($k_sec_array) ? implode(", ", $k_sec_array) : "Ninguna";
         
-        return "Actúa como Experto SEO Senior para 'CoticeFácil'.
-        
-OBJETIVO: Crear un artículo perfectamente optimizado para la keyword: '$k_main'.
-ESTRATEGIA DE NEGOCIO: $estrategia.
+        // Prompt de Ingeniería SEO Avanzada
+        return "Actúa como un Editor Jefe de SEO y Copywriter Senior para 'CoticeFácil' (Colombia).
+TU TAREA: Escribir el mejor artículo en español que exista en internet sobre: '$k_main'. Debe superar a la competencia actual en Google en profundidad y calidad.
 
-INSTRUCCIONES DE REDACCIÓN SEO:
-1. Keyword Principal ('$k_main'): Debe aparecer en el H1, en el primer párrafo (negrita), y en al menos un H2.
-2. Keywords Secundarias ($k_sec): Deben integrarse de forma natural en el contenido.
-3. Meta Descripción: Crea un resumen persuasivo de menos de 160 caracteres.
+DATOS CLAVE:
+- Keyword Principal: $k_main
+- Keywords Secundarias: $k_sec (intégralas naturalmente en el texto).
+- Estrategia/Tono: $estrategia.
+
+REQUISITOS OBLIGATORIOS DEL CONTENIDO (Google Quality E-E-A-T):
+1. LONGITUD: Mínimo 1500 palabras. Debe ser un contenido pilar ("pillar page"), exhaustivo.
+2. ESTRUCTURA:
+   - H1: Título Ganador (debe incluir la keyword principal).
+   - Introducción: Enganchadora, plantea el problema del usuario y la solución que ofrece el artículo.
+   - Cuerpo: Organiza la información usando múltiples H2 y H3 para sub-secciones. Rompe los bloques de texto.
+   - Listas: Usa listas con viñetas (<ul>) o numeradas (<ol>) siempre que sea posible para mejorar la legibilidad.
+   - Negritas: Usa <strong> para resaltar las ideas o frases clave más importantes (sin abusar).
+   - Conclusión: Resumen y un llamado a la acción (CTA) claro para que coticen en CoticeFácil.
+   - Sección FAQ: Incluye al final una sección con H2 \"Preguntas Frecuentes\" y al menos 3 preguntas (H3) y respuestas relevantes sobre el tema.
 
 IMPORTANTE - FORMATO DE RESPUESTA JSON:
-Responde SOLO con este objeto JSON válido (sin markdown):
+Responde SOLO con este objeto JSON válido (asegúrate de que el campo 'html_content' contenga TODO el artículo largo y estructurado):
 {
- \"title\": \"Título H1 Optimizado\",
- \"meta_description\": \"Meta descripción para SEO (máx 160 chars)\",
+ \"title\": \"El Título H1 Optimizado\",
+ \"meta_description\": \"Meta descripción persuasiva (<160 chars) con la keyword principal\",
  \"main_keyword\": \"$k_main\",
- \"secondary_keywords\": \"Lista de keywords secundarias usadas separadas por coma\",
- \"html_content\": \"<p>El artículo en HTML (h2, h3, p, ul). NO incluyas h1 ni body.</p>\",
- \"image_prompt\": \"Prompt detallado para DALL-E (estilo corporativo moderno)\"
+ \"secondary_keywords\": \"Lista de las keywords secundarias que usaste\",
+ \"html_content\": \"<p>Introducción...</p> <h2>Sección 1</h2> <p>...</p> <ul><li>...</li></ul> <h2>Sección 2</h2> ... <h2>FAQ</h2> <h3>Pregunta 1</h3><p>Respuesta</p> ... (Todo el HTML masivo aquí)\",
+ \"image_prompt\": \"Prompt detallado para DALL-E estilo corporativo moderno\"
 }";
     }
 
-    /**
-     * 4. EJECUTAR PROMPT (TEXTO - GPT-4o)
-     */
+    // --- 4. EJECUTAR TEXTO (Aumentado el timeout para artículos largos) ---
     public function ejecutar_prompt_texto($prompt) {
-        if (empty($this->api_key)) throw new Exception("Falta la API Key de OpenAI.");
+        if (empty($this->api_key)) throw new Exception("Falta la API Key.");
 
-        $args = [
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->api_key,
-                'Content-Type'  => 'application/json'
-            ],
+        $response = wp_remote_post(self::URL_CHAT, [
+            'headers' => ['Authorization' => 'Bearer ' . $this->api_key, 'Content-Type' => 'application/json'],
             'body' => json_encode([
                 'model' => 'gpt-4o', 
                 'messages' => [['role' => 'user', 'content' => $prompt]],
-                'response_format' => ['type' => 'json_object'] // Forzamos JSON
+                'response_format' => ['type' => 'json_object'],
+                // IMPORTANTE: Permitir respuesta máxima de tokens
+                'max_tokens' => 4000 
             ]),
-            'timeout' => 120, // 2 minutos para redacción larga
-            'method'  => 'POST'
-        ];
+            // IMPORTANTE: Timeout de 3 minutos porque escribir 1500 palabras tarda
+            'timeout' => 180 
+        ]);
 
-        $response = wp_remote_post(self::URL_CHAT, $args);
-
-        if (is_wp_error($response)) {
-            throw new Exception("Error conexión OpenAI: " . $response->get_error_message());
-        }
-
+        if (is_wp_error($response)) throw new Exception("Error OpenAI: " . $response->get_error_message());
         $body = json_decode(wp_remote_retrieve_body($response));
-
-        if (isset($body->error)) {
-            throw new Exception("OpenAI API Error: " . $body->error->message);
-        }
-        
-        if (!isset($body->choices[0]->message->content)) {
-            throw new Exception("La IA devolvió una respuesta vacía.");
-        }
-
+        if (isset($body->error)) throw new Exception("API Error: " . $body->error->message);
+        if (!isset($body->choices[0]->message->content)) throw new Exception("Respuesta vacía de IA.");
         return json_decode($body->choices[0]->message->content);
     }
 
-    /**
-     * 5. EJECUTAR IMAGEN (DALL-E 3)
-     */
+    // --- 5. EJECUTAR IMAGEN (Igual que antes) ---
     public function ejecutar_dall_e($prompt) {
-        $safe_prompt = substr($prompt, 0, 900); // Límite de caracteres
-
-        $args = [
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->api_key,
-                'Content-Type'  => 'application/json'
-            ],
-            'body' => json_encode([
-                'model' => 'dall-e-3',
-                'prompt' => "Professional corporate minimalist style: " . $safe_prompt,
-                'n' => 1,
-                'size' => '1024x1024'
-            ]),
-            'timeout' => 90, // DALL-E es lento
-            'method'  => 'POST'
-        ];
-
-        $response = wp_remote_post(self::URL_IMAGE, $args);
-
-        if (is_wp_error($response)) {
-            throw new Exception("Error conexión DALL-E: " . $response->get_error_message());
-        }
-
+        $response = wp_remote_post(self::URL_IMAGE, [
+            'headers' => ['Authorization' => 'Bearer ' . $this->api_key, 'Content-Type' => 'application/json'],
+            'body' => json_encode(['model' => 'dall-e-3', 'prompt' => "Corporate minimalist style: ".substr($prompt, 0, 900), 'n' => 1, 'size' => '1024x1024']),
+            'timeout' => 90
+        ]);
+        if (is_wp_error($response)) throw new Exception("Error DALL-E: " . $response->get_error_message());
         $body = json_decode(wp_remote_retrieve_body($response));
-
-        if (isset($body->error)) {
-            throw new Exception("DALL-E API Error: " . $body->error->message);
-        }
-
         return $body->data[0]->url ?? '';
     }
 
-    /**
-     * 6. GUARDAR IMAGEN EN WORDPRESS
-     */
+    // --- 6. GUARDAR IMAGEN (Igual que antes) ---
     public function asignar_imagen_destacada($image_url, $post_id, $desc) {
         if (empty($image_url)) return false;
-
         require_once(ABSPATH . 'wp-admin/includes/media.php');
         require_once(ABSPATH . 'wp-admin/includes/file.php');
         require_once(ABSPATH . 'wp-admin/includes/image.php');
-
-        // Descarga segura del archivo temporal
         $tmp = download_url($image_url);
-
         if (is_wp_error($tmp)) return false;
-
-        $file_array = [
-            'name' => sanitize_title($desc) . '.jpg',
-            'tmp_name' => $tmp
-        ];
-
-        // "Sideload" mueve el archivo a la carpeta uploads de WP
-        $id_img = media_handle_sideload($file_array, $post_id);
-
-        if (is_wp_error($id_img)) {
-            @unlink($file_array['tmp_name']); // Borrar basura si falla
-            return false;
-        }
-
-        set_post_thumbnail($post_id, $id_img);
+        $id_img = media_handle_sideload(['name' => sanitize_title($desc).'.jpg', 'tmp_name' => $tmp], $post_id);
+        if (!is_wp_error($id_img)) set_post_thumbnail($post_id, $id_img);
         return true;
     }
 }
