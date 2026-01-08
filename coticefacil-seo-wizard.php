@@ -1,64 +1,72 @@
 <?php
 /**
- * Plugin Name: CoticeFácil SEO Wizard
- * Description: Analiza CSVs de palabras clave y genera Prompts Maestros para IA basados en estrategias de tráfico o leads.
- * Version: 1.0
- * Author: Tu Equipo de Desarrollo
+ * Plugin Name: CoticeFácil SEO Wizard (Auto)
+ * Description: Analiza CSV, Genera Contenido con GPT-4, Crea Imágenes con DALL-E y Publica en WP.
+ * Version: 2.0
  */
 
-// Evitar acceso directo
-if (!defined('ABSPATH')) {
-    exit;
-}
+if (!defined('ABSPATH')) exit;
 
-// Definir constantes de rutas
 define('CF_SEO_PATH', plugin_dir_path(__FILE__));
-
-// Incluir la clase lógica
 require_once CF_SEO_PATH . 'includes/class-seo-brain.php';
 
-// Crear el menú en el admin
+// Añadir menú y configuración
 function cf_seo_add_admin_menu() {
-    add_menu_page(
-        'CoticeFácil SEO',           // Título de página
-        'SEO Wizard',                // Título del menú
-        'manage_options',            // Capacidad requerida
-        'coticefacil-seo-wizard',    // Slug del menú
-        'cf_seo_render_admin_page',  // Función que renderiza la vista
-        'dashicons-chart-line',      // Icono
-        99                           // Posición
-    );
+    add_menu_page('CoticeFácil SEO', 'SEO Auto', 'manage_options', 'coticefacil-seo-wizard', 'cf_seo_render_admin_page', 'dashicons-superhero', 99);
+    register_setting('cf_seo_settings', 'cf_openai_key');
 }
 add_action('admin_menu', 'cf_seo_add_admin_menu');
+add_action('admin_init', function() { register_setting('cf_seo_group', 'cf_openai_key'); });
 
-// Función controladora para mostrar la vista
+// Lógica Principal
 function cf_seo_render_admin_page() {
-    // Lógica de procesamiento de formulario
-    $resultado_prompt = null;
-    $error_msg = null;
+    $mensaje = null;
+    $error = null;
 
     if (isset($_POST['cf_seo_submit']) && check_admin_referer('cf_seo_action', 'cf_seo_nonce')) {
+        $api_key = get_option('cf_openai_key');
         
-        if (!empty($_FILES['csv_file']['tmp_name'])) {
-            $estrategia = sanitize_text_field($_POST['estrategia']);
+        if (empty($api_key)) {
+            $error = "Falta la API Key de OpenAI en la configuración.";
+        } elseif (!empty($_FILES['csv_file']['tmp_name'])) {
             
+            // Aumentar tiempo de espera (Generar imágenes tarda)
+            set_time_limit(300); 
+
             try {
-                // Instanciar el cerebro
-                $cerebro = new CF_SEO_Brain();
-                // 1. Leer CSV
+                $cerebro = new CF_SEO_Brain($api_key);
+                $estrategia = sanitize_text_field($_POST['estrategia']);
+
+                // 1. Analizar CSV
                 $datos = $cerebro->leer_csv($_FILES['csv_file']['tmp_name']);
-                // 2. Analizar datos
                 $analisis = $cerebro->analizar_datos($datos, $estrategia);
-                // 3. Generar Prompt
-                $resultado_prompt = $cerebro->generar_prompt($analisis, $estrategia);
+
+                // 2. Generar Contenido (Texto + Prompt de Imagen) via API
+                $contenido_generado = $cerebro->generar_articulo_ia($analisis, $estrategia);
+
+                // 3. Generar Imagen via API (DALL-E)
+                $url_imagen = $cerebro->generar_imagen_ia($contenido_generado->image_prompt);
+
+                // 4. Crear Página en WordPress
+                $page_id = wp_insert_post([
+                    'post_title'   => $contenido_generado->title,
+                    'post_content' => $contenido_generado->html_content,
+                    'post_status'  => 'draft', // Lo dejamos en borrador por seguridad
+                    'post_type'    => 'page',  // IMPORTANTE: Crea una PAGINA, no una entrada
+                    'post_author'  => get_current_user_id()
+                ]);
+
+                // 5. Subir y Asignar Imagen Destacada
+                if ($page_id && $url_imagen) {
+                    $cerebro->asignar_imagen_destacada($url_imagen, $page_id, $contenido_generado->title);
+                }
+
+                $mensaje = "¡Éxito! Página creada: <a href='".get_edit_post_link($page_id)."'>Editar Página</a>";
+
             } catch (Exception $e) {
-                $error_msg = $e->getMessage();
+                $error = "Error: " . $e->getMessage();
             }
-        } else {
-            $error_msg = "Por favor sube un archivo CSV válido.";
         }
     }
-
-    // Incluir el archivo de vista (HTML)
     include CF_SEO_PATH . 'admin/admin-view.php';
 }
